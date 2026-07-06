@@ -819,7 +819,7 @@ static void draw_node_glow(Vector2 center, Color color) {
  */
 static void draw_node(const RenderResources *resources, const Node *node, int active,
                       const Theme *theme, const RenderOptions *options) {
-	(void)active;
+    (void)active;
     Vector2 center = {node->x, node->y};
     bool show_times = options->algorithm_mode == ALGORITHM_DFS;
     bool show_level = options->algorithm_mode == ALGORITHM_BFS;
@@ -880,27 +880,99 @@ static const char *layout_mode_name(LayoutMode mode) {
     }
 }
 
-static void build_tree_output(const Graph *graph, const Trace *trace,
-                              size_t active_index, char *buffer,
-                              size_t buffer_size) {
-    if (buffer_size == 0) return;
+static bool append_tree_text(char *buffer, size_t buffer_size, size_t *used,
+                             const char *text, bool separated) {
+    int written;
 
+    if (separated && *used > 0 && buffer[*used - 1] != '(' &&
+        buffer[*used - 1] != ' ') {
+        if (*used >= buffer_size - 1) return false;
+        buffer[*used] = ' ';
+        (*used)++;
+        buffer[*used] = '\0';
+    }
+    if (*used >= buffer_size - 1) return false;
+
+    written = snprintf(buffer + *used, buffer_size - *used, "%s", text);
+    if (written < 0) return false;
+    if ((size_t)written >= buffer_size - *used) {
+        buffer[buffer_size - 1] = '\0';
+        *used = buffer_size - 1;
+        return false;
+    }
+
+    *used += (size_t)written;
+    return true;
+}
+
+static void append_parenthesized_inorder_node(const Graph *graph, int node,
+                                              size_t depth, char *buffer,
+                                              size_t buffer_size, size_t *used) {
+    bool has_children;
+    bool emitted_node = false;
+    int child_index = 0;
+
+    if (node < 0 || (size_t)node >= graph->node_count) return;
+    if (depth > graph->node_count) return;
+
+    has_children = graph->first_out[node] != -1;
+    if (has_children && !append_tree_text(buffer, buffer_size, used, "(", true))
+        return;
+
+    for (int edge_id = graph->first_out[node]; edge_id != -1;
+         edge_id = graph_next_adjacent_edge(graph, edge_id, node, false)) {
+        int child = graph_edge_neighbor(graph, edge_id, node);
+
+        if (child < 0) continue;
+        if (child_index == 1) {
+            if (!append_tree_text(buffer, buffer_size, used,
+                                  graph->nodes[node].label, true))
+                return;
+            emitted_node = true;
+        }
+        child_index++;
+        append_parenthesized_inorder_node(graph, child, depth + 1, buffer,
+                                          buffer_size, used);
+    }
+
+    if (!emitted_node)
+        append_tree_text(buffer, buffer_size, used, graph->nodes[node].label, true);
+    if (has_children) append_tree_text(buffer, buffer_size, used, ")", false);
+}
+
+static int tree_expression_root(const Graph *graph) {
+    for (size_t node = 0; node < graph->node_count; node++) {
+        bool has_parent = false;
+
+        for (size_t edge = 0; edge < graph->edge_count; edge++) {
+            if (graph->edges[edge].to == (int)node) has_parent = true;
+        }
+        if (!has_parent) return (int)node;
+    }
+
+    return graph->node_count > 0 ? 0 : -1;
+}
+
+static void build_tree_output(const Graph *graph, const Trace *trace,
+                              size_t active_index, TreeTraversalOrder order,
+                              char *buffer, size_t buffer_size) {
+    if (buffer_size == 0) return;
     buffer[0] = '\0';
+
     size_t used = 0;
+    if (order == TREE_ORDER_INORDER && trace->count > 0 &&
+        active_index >= trace->count - 1) {
+        append_parenthesized_inorder_node(graph, tree_expression_root(graph), 0,
+                                          buffer, buffer_size, &used);
+        return;
+    }
 
     for (size_t i = 0; i <= active_index && i < trace->count; i++) {
         const TraceEvent *event = &trace->events[i];
         if (event->type != TRACE_EVENT_DISCOVER_NODE) continue;
-
-        const char *label = graph->nodes[event->node].label;
-        int written = snprintf(buffer + used, buffer_size - used, "%s%s",
-                               used == 0 ? "" : " ", label);
-        if (written < 0) return;
-        if ((size_t)written >= buffer_size - used) {
-            buffer[buffer_size - 1] = '\0';
+        if (!append_tree_text(buffer, buffer_size, &used,
+                              graph->nodes[event->node].label, true))
             return;
-        }
-        used += (size_t)written;
     }
 }
 
@@ -915,8 +987,9 @@ static void describe_event(const Graph *graph, const Trace *trace,
     const TraceEvent *event = &trace->events[active_index];
 
     if (options->algorithm_mode == ALGORITHM_TREE) {
-        char output[96];
-        build_tree_output(graph, trace, active_index, output, sizeof(output));
+        char output[128];
+        build_tree_output(graph, trace, active_index, options->tree_order, output,
+                          sizeof(output));
         snprintf(buffer, buffer_size, "%s: %s",
                  tree_traversal_order_name(options->tree_order), output);
         return;
@@ -1445,7 +1518,7 @@ static void draw_graph_word_background(const RenderResources *resources) {
 static void draw_event_banner(const Graph *graph, const Trace *trace,
                               size_t active_index, const RenderResources *resources,
                               const RenderOptions *options, const Theme *theme) {
-    char event_text[128];
+    char event_text[192];
     describe_event(graph, trace, active_index, options, event_text,
                    sizeof(event_text));
 

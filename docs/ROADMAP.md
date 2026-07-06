@@ -8,8 +8,8 @@
   directed/undirected edge classification are implemented.
 - BFS has its own presentation with node levels and a depth gradient, but still
   needs queue/frontier visualization.
-- Tree traversal can load tree `.graphe` files and show preorder, inorder, and
-  postorder output on the expression-tree prototype.
+- Tree traversal can load tree `.graphe` files and show preorder, parenthesized
+  inorder, and postorder output on the expression-tree prototype.
 - Graph directedness lives in `Graph`; undirected graphs store one shared edge
   linked from both endpoints so traversal stays `O(V + E)`.
 - Focused C tests cover core graph, traversal, and import behavior.
