@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct Theme {
     Color background;
@@ -36,6 +37,12 @@ typedef struct EdgeGeometry {
     Vector2 end_direction;
     float bend;
 } EdgeGeometry;
+
+typedef struct EdgeTopologyCurve {
+    bool separated;
+    float bend;
+    float sign;
+} EdgeTopologyCurve;
 
 struct EdgeCurveCacheEntry {
     bool valid;
@@ -262,6 +269,25 @@ static int node_count_with_level(const Graph *graph) {
     }
 
     return count;
+}
+
+static int settled_node_count(const Graph *graph) {
+    int count = 0;
+
+    for (size_t i = 0; i < graph->node_count; i++) {
+        if (graph->nodes[i].color == NODE_BLACK) count++;
+    }
+
+    return count;
+}
+
+static int dijkstra_source_node(const Trace *trace) {
+    for (size_t i = 0; i < trace->count; i++) {
+        if (trace->events[i].type == TRACE_EVENT_SET_DISTANCE)
+            return trace->events[i].node;
+    }
+
+    return -1;
 }
 
 static Vector2 vector_add(Vector2 a, Vector2 b) {
@@ -515,6 +541,49 @@ static float edge_bend_amount(EdgeType type, float distance) {
     return clamp_float(distance * factor, 18.0f, 70.0f);
 }
 
+/*
+ * Assigns stable curve lanes when multiple directed edges share the same two
+ * endpoints. Reciprocal directions use the same local sign; because their edge
+ * directions (and therefore normals) are reversed, they land on opposite sides
+ * of the straight node-to-node line. Same-direction parallels alternate sides.
+ */
+static EdgeTopologyCurve edge_topology_curve(const Graph *graph, size_t edge_index,
+                                             float distance) {
+    EdgeTopologyCurve curve = {0};
+    const Edge *edge = &graph->edges[edge_index];
+
+    if (!graph->directed || edge->from == edge->to) return curve;
+
+    int same_direction_count = 0;
+    int same_direction_before = 0;
+    int reverse_direction_count = 0;
+    for (size_t i = 0; i < graph->edge_count; i++) {
+        const Edge *other = &graph->edges[i];
+
+        if (other->from == edge->from && other->to == edge->to) {
+            same_direction_count++;
+            if (i < edge_index) same_direction_before++;
+        } else if (other->from == edge->to && other->to == edge->from) {
+            reverse_direction_count++;
+        }
+    }
+
+    float base_bend = clamp_float(distance * 0.16f, 24.0f, 58.0f);
+    if (reverse_direction_count > 0) {
+        curve.separated = true;
+        curve.bend = clamp_float(base_bend + (float)same_direction_before * 13.0f,
+                                 24.0f, 82.0f);
+        curve.sign = 1.0f;
+    } else if (same_direction_count > 1) {
+        curve.separated = true;
+        curve.bend = clamp_float(
+            base_bend + (float)(same_direction_before / 2) * 13.0f, 24.0f, 82.0f);
+        curve.sign = same_direction_before % 2 == 0 ? -1.0f : 1.0f;
+    }
+
+    return curve;
+}
+
 static float fallback_edge_curve_sign(const Node *from, const Node *to,
                                       EdgeType type, const RenderOptions *options) {
     Vector2 mid = {(from->x + to->x) * 0.5f, (from->y + to->y) * 0.5f};
@@ -704,15 +773,19 @@ static EdgeGeometry make_edge_geometry(RenderResources *resources,
         .end_direction = direction,
         .bend = 0.0f,
     };
-    float bend = active && edge->type == EDGE_UNCLASSIFIED
+    EdgeTopologyCurve topology = edge_topology_curve(graph, edge_index, distance);
+    float bend = topology.separated ? topology.bend
+                 : active && edge->type == EDGE_UNCLASSIFIED
                      ? 0.0f
                      : edge_bend_amount(edge->type, distance);
 
     if (bend <= 0.0f) return geometry;
 
     Vector2 normal = {-direction.y, direction.x};
-    float sign = edge_curve_sign(resources, graph, edge_index, geometry, normal,
-                                 bend, node_padding, options);
+    float sign = topology.separated
+                     ? topology.sign
+                     : edge_curve_sign(resources, graph, edge_index, geometry,
+                                       normal, bend, node_padding, options);
 
     return curved_edge_geometry(from, to, geometry, normal, bend, sign,
                                 node_padding);
@@ -753,6 +826,34 @@ static void draw_edge_arrow(const Graph *graph, size_t edge_index,
     draw_arrowhead(geometry.end, geometry.end_direction, color);
 }
 
+static void draw_edge_weight(const RenderResources *resources, const Edge *edge,
+                             EdgeGeometry geometry, const Theme *theme) {
+    char weight[24];
+    snprintf(weight, sizeof(weight), "%d", edge->weight);
+
+    Vector2 point =
+        geometry.bend > 0.0f
+            ? quadratic_point(geometry.start, geometry.control, geometry.end, 0.5f)
+            : vector_scale(vector_add(geometry.start, geometry.end), 0.5f);
+    Vector2 direction =
+        vector_normalize(vector_subtract(geometry.end, geometry.start));
+    Vector2 normal = {-direction.y, direction.x};
+    point = vector_add(point, vector_scale(normal, 10.0f));
+
+    const float font_size = 16.0f;
+    Vector2 size = measure_text(resources, weight, font_size);
+    Rectangle box = {point.x - size.x * 0.5f - 5.0f, point.y - size.y * 0.5f - 2.0f,
+                     size.x + 10.0f, size.y + 4.0f};
+    const float border = 1.5f;
+    Rectangle fill = {box.x + border, box.y + border, box.width - border * 2.0f,
+                      box.height - border * 2.0f};
+    DrawRectangleRounded(box, 0.35f, 6, theme->panel_border);
+    DrawRectangleRounded(fill, 0.31f, 6, theme->panel);
+    draw_text(resources, weight,
+              (Vector2){point.x - size.x * 0.5f, point.y - size.y * 0.5f}, font_size,
+              theme->text);
+}
+
 static void draw_time_label(const RenderResources *resources, const Node *node,
                             Color color) {
     char times[64];
@@ -788,6 +889,20 @@ static void draw_level_label(const RenderResources *resources, const Node *node,
               15.0f, color);
 }
 
+static void draw_distance_label(const RenderResources *resources, const Node *node,
+                                Color color) {
+    char distance[24];
+    if (node->distance == GRAPHE_DISTANCE_INFINITY) {
+        snprintf(distance, sizeof(distance), "d=inf");
+    } else {
+        snprintf(distance, sizeof(distance), "d=%lld", node->distance);
+    }
+
+    Vector2 size = measure_text(resources, distance, 15.0f);
+    draw_text(resources, distance,
+              (Vector2){node->x - size.x * 0.5f, node->y + 7.0f}, 15.0f, color);
+}
+
 #ifdef GRAPHE_GLOW
 static void draw_node_glow(Vector2 center, Color color) {
     const float inner_radii[] = {
@@ -814,8 +929,8 @@ static void draw_node_glow(Vector2 center, Color color) {
 
 /*
  * Draws node fill, label, and mode-specific secondary text. The color selection
- * lives here because DFS, BFS, and tree mode intentionally emphasize different
- * state on the same Graph data.
+ * lives here because DFS, BFS, Dijkstra, and tree mode intentionally emphasize
+ * different state on the same Graph data.
  */
 static void draw_node(const RenderResources *resources, const Node *node, int active,
                       const Theme *theme, const RenderOptions *options) {
@@ -823,6 +938,7 @@ static void draw_node(const RenderResources *resources, const Node *node, int ac
     Vector2 center = {node->x, node->y};
     bool show_times = options->algorithm_mode == ALGORITHM_DFS;
     bool show_level = options->algorithm_mode == ALGORITHM_BFS;
+    bool show_distance = options->algorithm_mode == ALGORITHM_DIJKSTRA;
     bool show_tree_output = options->algorithm_mode == ALGORITHM_TREE;
     Color fill = show_level         ? bfs_level_fill_color(theme, node)
                  : show_tree_output ? tree_node_fill_color(theme, node)
@@ -843,13 +959,15 @@ static void draw_node(const RenderResources *resources, const Node *node, int ac
     DrawRing(center, GRAPHE_NODE_RADIUS - 1.8f, GRAPHE_NODE_RADIUS, 0, 360, 64,
              outline);
 
-    float label_y = show_times || show_level ? node->y - label_size.y + 3.0f
-                                             : node->y - label_size.y * 0.5f;
+    float label_y = show_times || show_level || show_distance
+                        ? node->y - label_size.y + 3.0f
+                        : node->y - label_size.y * 0.5f;
 
     draw_text(resources, node->label,
               (Vector2){node->x - label_size.x * 0.5f, label_y}, 24.0f, label_color);
     if (show_times) draw_time_label(resources, node, time_color);
     if (show_level) draw_level_label(resources, node, time_color);
+    if (show_distance) draw_distance_label(resources, node, time_color);
 }
 
 static const char *event_type_name(TraceEventType type) {
@@ -862,6 +980,12 @@ static const char *event_type_name(TraceEventType type) {
         return "classify edge";
     case TRACE_EVENT_FINISH_NODE:
         return "finish node";
+    case TRACE_EVENT_SET_DISTANCE:
+        return "set distance";
+    case TRACE_EVENT_RELAX_EDGE:
+        return "relax edge";
+    case TRACE_EVENT_SETTLE_NODE:
+        return "settle node";
     default:
         return "unknown";
     }
@@ -976,6 +1100,14 @@ static void build_tree_output(const Graph *graph, const Trace *trace,
     }
 }
 
+static void format_distance(long long distance, char *buffer, size_t buffer_size) {
+    if (distance == GRAPHE_DISTANCE_INFINITY) {
+        snprintf(buffer, buffer_size, "inf");
+    } else {
+        snprintf(buffer, buffer_size, "%lld", distance);
+    }
+}
+
 static void describe_event(const Graph *graph, const Trace *trace,
                            size_t active_index, const RenderOptions *options,
                            char *buffer, size_t buffer_size) {
@@ -992,6 +1124,58 @@ static void describe_event(const Graph *graph, const Trace *trace,
                           sizeof(output));
         snprintf(buffer, buffer_size, "%s: %s",
                  tree_traversal_order_name(options->tree_order), output);
+        return;
+    }
+
+    if (options->algorithm_mode == ALGORITHM_DIJKSTRA) {
+        switch (event->type) {
+        case TRACE_EVENT_SET_DISTANCE:
+            snprintf(buffer, buffer_size, "set source %s distance to 0",
+                     graph->nodes[event->node].label);
+            break;
+        case TRACE_EVENT_SETTLE_NODE:
+            snprintf(buffer, buffer_size, "settle %s at distance %lld",
+                     graph->nodes[event->node].label, event->distance);
+            break;
+        case TRACE_EVENT_EXAMINE_EDGE: {
+            const Edge *edge = &graph->edges[event->edge];
+            long long from_distance = graph->nodes[event->from].distance;
+            long long candidate = GRAPHE_DISTANCE_INFINITY;
+            if (from_distance != GRAPHE_DISTANCE_INFINITY && edge->weight >= 0 &&
+                (long long)edge->weight <= GRAPHE_DISTANCE_INFINITY - from_distance)
+                candidate = from_distance + edge->weight;
+
+            char candidate_text[24];
+            char current_text[24];
+            format_distance(candidate, candidate_text, sizeof(candidate_text));
+            format_distance(graph->nodes[event->to].distance, current_text,
+                            sizeof(current_text));
+            long long current = graph->nodes[event->to].distance;
+            const char *result =
+                candidate == GRAPHE_DISTANCE_INFINITY
+                    ? "; distance exceeds supported range"
+                : current != GRAPHE_DISTANCE_INFINITY && candidate >= current
+                    ? "; no improvement"
+                    : "";
+            snprintf(buffer, buffer_size,
+                     "consider %s %s %s (w=%d): candidate %s, current %s%s",
+                     graph->nodes[event->from].label, graph->directed ? "->" : "-",
+                     graph->nodes[event->to].label, edge->weight, candidate_text,
+                     current_text, result);
+            break;
+        }
+        case TRACE_EVENT_RELAX_EDGE: {
+            char old_distance[24];
+            format_distance(event->old_distance, old_distance, sizeof(old_distance));
+            snprintf(buffer, buffer_size, "relax %s %s %s: %s -> %lld",
+                     graph->nodes[event->from].label, graph->directed ? "->" : "-",
+                     graph->nodes[event->to].label, old_distance, event->distance);
+            break;
+        }
+        default:
+            snprintf(buffer, buffer_size, "Unknown Dijkstra event");
+            break;
+        }
         return;
     }
 
@@ -1186,7 +1370,8 @@ RenderUiResult render_update_options(RenderOptions *options) {
     }
 
     if (IsKeyPressed(KEY_M)) {
-        options->algorithm_mode = (options->algorithm_mode + 1) % 3;
+        options->algorithm_mode =
+            (options->algorithm_mode + 1) % ALGORITHM_MODE_COUNT;
         result.trace_changed = true;
     }
 
@@ -1248,7 +1433,7 @@ static RenderUiResult draw_settings(RenderResources *resources,
     float top = ui_size(options, 96.0f);
     float column_gap = ui_size(options, 24.0f);
     float column_width = (content_width - column_gap) * 0.5f;
-    Rectangle algorithms = {content_x, top, column_width, ui_size(options, 178.0f)};
+    Rectangle algorithms = {content_x, top, column_width, ui_size(options, 218.0f)};
     Rectangle layouts = {content_x, algorithms.y + algorithms.height + column_gap,
                          column_width, ui_size(options, 166.0f)};
     Rectangle utilities = {content_x + column_width + column_gap, top, column_width,
@@ -1292,6 +1477,15 @@ static RenderUiResult draw_settings(RenderResources *resources,
     }
     if (rounded_choice_button(resources, options, theme,
                               settings_section_row(options, algorithms, 2),
+                              "Dijkstra: weights and distances",
+                              options->algorithm_mode == ALGORITHM_DIJKSTRA) &&
+        options->algorithm_mode != ALGORITHM_DIJKSTRA) {
+        options->algorithm_mode = ALGORITHM_DIJKSTRA;
+        result.trace_changed = true;
+        result.consumed_click = true;
+    }
+    if (rounded_choice_button(resources, options, theme,
+                              settings_section_row(options, algorithms, 3),
                               "Tree traversal: expression output",
                               options->algorithm_mode == ALGORITHM_TREE) &&
         options->algorithm_mode != ALGORITHM_TREE) {
@@ -1515,6 +1709,98 @@ static void draw_graph_word_background(const RenderResources *resources) {
                    (Vector2){0.0f, 0.0f}, WHITE);
 }
 
+#define GRAPHE_EVENT_BANNER_LINE_COUNT 2
+#define GRAPHE_EVENT_BANNER_LINE_MAX 192
+
+static void copy_text_range(char *out, size_t out_size, const char *text,
+                            size_t length) {
+    if (out_size == 0) return;
+    if (length >= out_size) length = out_size - 1;
+
+    memcpy(out, text, length);
+    out[length] = '\0';
+}
+
+/* Splits at the word boundary that produces the most balanced two lines. */
+static int split_event_banner_text(
+    const RenderResources *resources, const char *text, float text_size,
+    char lines[GRAPHE_EVENT_BANNER_LINE_COUNT][GRAPHE_EVENT_BANNER_LINE_MAX]) {
+    size_t length = strlen(text);
+    size_t best_split = 0;
+    float best_width = -1.0f;
+    char left[GRAPHE_EVENT_BANNER_LINE_MAX];
+    char right[GRAPHE_EVENT_BANNER_LINE_MAX];
+
+    for (size_t i = 1; i < length; i++) {
+        if (text[i] != ' ') continue;
+
+        size_t right_start = i + 1;
+        while (right_start < length && text[right_start] == ' ') right_start++;
+        if (right_start >= length) continue;
+
+        copy_text_range(left, sizeof(left), text, i);
+        snprintf(right, sizeof(right), "%s", text + right_start);
+        float left_width = measure_text(resources, left, text_size).x;
+        float right_width = measure_text(resources, right, text_size).x;
+        float widest = left_width > right_width ? left_width : right_width;
+
+        if (best_width < 0.0f || widest < best_width) {
+            best_width = widest;
+            best_split = i;
+        }
+    }
+
+    if (best_split == 0) {
+        snprintf(lines[0], GRAPHE_EVENT_BANNER_LINE_MAX, "%s", text);
+        lines[1][0] = '\0';
+        return 1;
+    }
+
+    size_t right_start = best_split + 1;
+    while (right_start < length && text[right_start] == ' ') right_start++;
+    copy_text_range(lines[0], GRAPHE_EVENT_BANNER_LINE_MAX, text, best_split);
+    snprintf(lines[1], GRAPHE_EVENT_BANNER_LINE_MAX, "%s", text + right_start);
+    return 2;
+}
+
+static float event_banner_lines_width(
+    const RenderResources *resources,
+    char lines[GRAPHE_EVENT_BANNER_LINE_COUNT][GRAPHE_EVENT_BANNER_LINE_MAX],
+    int line_count, float text_size) {
+    float width = 0.0f;
+
+    for (int i = 0; i < line_count; i++) {
+        float line_width = measure_text(resources, lines[i], text_size).x;
+        if (line_width > width) width = line_width;
+    }
+
+    return width;
+}
+
+static void fit_event_banner_line(const RenderResources *resources, char *line,
+                                  size_t line_size, float text_size,
+                                  float max_width) {
+    if (measure_text(resources, line, text_size).x <= max_width) return;
+
+    char original[GRAPHE_EVENT_BANNER_LINE_MAX];
+    size_t length = 0;
+    size_t source_limit = line_size > 0 ? line_size - 1 : 0;
+    if (source_limit >= sizeof(original)) source_limit = sizeof(original) - 1;
+    while (length < source_limit && line[length] != '\0') length++;
+    copy_text_range(original, sizeof(original), line, length);
+
+    while (length > 0) {
+        length--;
+        while (length > 0 && ((unsigned char)original[length] & 0xc0u) == 0x80u)
+            length--;
+
+        snprintf(line, line_size, "%.*s...", (int)length, original);
+        if (measure_text(resources, line, text_size).x <= max_width) return;
+    }
+
+    snprintf(line, line_size, "...");
+}
+
 static void draw_event_banner(const Graph *graph, const Trace *trace,
                               size_t active_index, const RenderResources *resources,
                               const RenderOptions *options, const Theme *theme) {
@@ -1522,18 +1808,49 @@ static void draw_event_banner(const Graph *graph, const Trace *trace,
     describe_event(graph, trace, active_index, options, event_text,
                    sizeof(event_text));
 
-    float text_size = ui_size(options, 22.0f);
-    Vector2 text = measure_text(resources, event_text, text_size);
     float graph_width = render_graph_area_width(options);
     float graph_height = render_graph_area_height();
+    float side_margin = ui_size(options, 40.0f);
+    if (side_margin > graph_width * 0.12f) side_margin = graph_width * 0.12f;
+    float max_width = graph_width - side_margin * 2.0f;
     float padding_x = ui_size(options, 22.0f);
     float padding_y = ui_size(options, 13.0f);
-    float max_width = graph_width - ui_size(options, 80.0f);
-    float width = text.x + padding_x * 2.0f;
+    if (padding_x * 2.0f > max_width * 0.25f) padding_x = max_width * 0.125f;
+    float max_line_width = max_width - padding_x * 2.0f;
+    float text_size = ui_size(options, 22.0f);
+    float min_text_size = ui_size(options, 16.0f);
+    float text_size_step = ui_size(options, 1.0f);
+    char lines[GRAPHE_EVENT_BANNER_LINE_COUNT][GRAPHE_EVENT_BANNER_LINE_MAX] = {{0}};
+    int line_count;
+    if (measure_text(resources, event_text, text_size).x <= max_line_width) {
+        snprintf(lines[0], sizeof(lines[0]), "%s", event_text);
+        line_count = 1;
+    } else {
+        line_count =
+            split_event_banner_text(resources, event_text, text_size, lines);
+    }
+    float lines_width =
+        event_banner_lines_width(resources, lines, line_count, text_size);
+
+    while (lines_width > max_line_width &&
+           text_size - text_size_step >= min_text_size) {
+        text_size -= text_size_step;
+        lines_width =
+            event_banner_lines_width(resources, lines, line_count, text_size);
+    }
+
+    for (int i = 0; i < line_count; i++)
+        fit_event_banner_line(resources, lines[i], sizeof(lines[i]), text_size,
+                              max_line_width);
+
+    lines_width = event_banner_lines_width(resources, lines, line_count, text_size);
+    float width = lines_width + padding_x * 2.0f;
 
     if (width > max_width) width = max_width;
 
-    float height = text_size + padding_y * 2.0f;
+    float line_gap = line_count > 1 ? ui_size(options, 5.0f) : 0.0f;
+    float height = text_size * (float)line_count +
+                   line_gap * (float)(line_count - 1) + padding_y * 2.0f;
     Rectangle box = {
         (graph_width - width) * 0.5f,
         graph_height - height - ui_size(options, 28.0f),
@@ -1544,10 +1861,15 @@ static void draw_event_banner(const Graph *graph, const Trace *trace,
 
     DrawRectangleRounded(box, 0.18f, 8, fill);
     DrawRectangleRoundedLines(box, 0.18f, 8, theme->panel_border);
-    draw_text(
-        resources, event_text,
-        (Vector2){box.x + padding_x, box.y + padding_y - ui_size(options, 1.0f)},
-        text_size, theme->text);
+    for (int i = 0; i < line_count; i++) {
+        Vector2 line_size = measure_text(resources, lines[i], text_size);
+        Vector2 position = {
+            box.x + (box.width - line_size.x) * 0.5f,
+            box.y + padding_y - ui_size(options, 1.0f) +
+                (text_size + line_gap) * (float)i,
+        };
+        draw_text(resources, lines[i], position, text_size, theme->text);
+    }
 }
 
 static RenderUiResult draw_sidebar(const Graph *graph, const Trace *trace,
@@ -1608,6 +1930,14 @@ static RenderUiResult draw_sidebar(const Graph *graph, const Trace *trace,
                  node_count_with_level(graph), (int)graph->node_count,
                  max_bfs_level(graph));
         draw_text(resources, level_text, (Vector2){x, y + line * 4.45f},
+                  ui_size(options, 19.0f), theme->muted_text);
+    } else if (options->algorithm_mode == ALGORITHM_DIJKSTRA) {
+        char dijkstra_text[96];
+        int source = dijkstra_source_node(trace);
+        snprintf(dijkstra_text, sizeof(dijkstra_text), "Source: %s, settled: %d/%d",
+                 source >= 0 ? graph->nodes[source].label : "-",
+                 settled_node_count(graph), (int)graph->node_count);
+        draw_text(resources, dijkstra_text, (Vector2){x, y + line * 4.45f},
                   ui_size(options, 19.0f), theme->muted_text);
     } else {
         draw_text(resources, layout_text, (Vector2){x, y + line * 4.45f},
@@ -1673,6 +2003,35 @@ static RenderUiResult draw_sidebar(const Graph *graph, const Trace *trace,
         return result;
     }
 
+    if (options->algorithm_mode == ALGORITHM_DIJKSTRA) {
+        float heading_y = y + line * 15.0f;
+        float item_x = x + ui_size(options, 22.0f);
+        float tentative_y = y + line * 16.0f;
+        float settled_y = y + line * 16.8f;
+        float predecessor_y = y + line * 17.6f;
+        float marker_x = x + ui_size(options, 7.0f);
+        float marker_radius = ui_size(options, 5.0f);
+
+        draw_text(resources, "Dijkstra State", (Vector2){x, heading_y},
+                  ui_size(options, 22.0f), theme->text);
+        DrawCircleV((Vector2){marker_x, tentative_y + ui_size(options, 9.0f)},
+                    marker_radius, theme->node_gray);
+        DrawCircleV((Vector2){marker_x, settled_y + ui_size(options, 9.0f)},
+                    marker_radius, theme->node_black);
+        DrawLineEx((Vector2){marker_x - marker_radius,
+                             predecessor_y + ui_size(options, 9.0f)},
+                   (Vector2){marker_x + marker_radius,
+                             predecessor_y + ui_size(options, 9.0f)},
+                   ui_size(options, 3.0f), theme->edge_tree);
+        draw_text(resources, "Tentative distance", (Vector2){item_x, tentative_y},
+                  ui_size(options, 19.0f), theme->muted_text);
+        draw_text(resources, "Settled distance", (Vector2){item_x, settled_y},
+                  ui_size(options, 19.0f), theme->muted_text);
+        draw_text(resources, "Current predecessor", (Vector2){item_x, predecessor_y},
+                  ui_size(options, 19.0f), theme->muted_text);
+        return result;
+    }
+
     if (options->algorithm_mode != ALGORITHM_DFS) return result;
 
     draw_text(resources, "Edge Types", (Vector2){x, y + line * 15.0f},
@@ -1680,11 +2039,18 @@ static RenderUiResult draw_sidebar(const Graph *graph, const Trace *trace,
 
     const EdgeType edge_types[] = {EDGE_TREE, EDGE_BACK, EDGE_FORWARD, EDGE_CROSS};
     const char *labels[] = {"Tree", "Back", "Forward", "Cross"};
+    float item_x = x + ui_size(options, 22.0f);
+    float marker_x = x + ui_size(options, 7.0f);
+    float marker_half_width = ui_size(options, 6.0f);
     for (int i = 0; i < 4; i++) {
         float item_y = y + 1.0f + line * (16.0f + (float)i * 0.8f);
         Color color = edge_color(theme, edge_types[i]);
-        draw_text(resources, labels[i], (Vector2){x, item_y},
-                  ui_size(options, 19.0f), color);
+        float marker_y = item_y + ui_size(options, 9.0f);
+        DrawLineEx((Vector2){marker_x - marker_half_width, marker_y},
+                   (Vector2){marker_x + marker_half_width, marker_y},
+                   ui_size(options, 3.0f), color);
+        draw_text(resources, labels[i], (Vector2){item_x, item_y},
+                  ui_size(options, 19.0f), theme->muted_text);
     }
 
     return result;
@@ -1729,6 +2095,16 @@ RenderUiResult render_graph(const Graph *graph, const Trace *trace,
         draw_edge_body(graph, i, geometry, active_examine, &theme, options);
         if (graph->directed)
             draw_edge_arrow(graph, i, geometry, active_examine, &theme, options);
+    }
+
+    if (options->algorithm_mode == ALGORITHM_DIJKSTRA) {
+        for (size_t i = 0; i < graph->edge_count; i++) {
+            if (!graph_edge_is_visible(graph, (int)i)) continue;
+            int active_edge = is_active_edge(graph, trace, active_index, i);
+            EdgeGeometry geometry =
+                make_edge_geometry(resources, graph, i, active_edge, options);
+            draw_edge_weight(resources, &graph->edges[i], geometry, &theme);
+        }
     }
 
     for (size_t i = 0; i < graph->node_count; i++)

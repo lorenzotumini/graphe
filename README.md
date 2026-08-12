@@ -2,7 +2,7 @@
 
 > _γραφή_ (_graphê_): writing, drawing, a traced line.
 
-Graphe is a small C/raylib project for visualizing graph algorithms with color-coded operations and interactive playback. DFS, BFS, and tree traversal are supported.
+Graphe is a small C/raylib project for visualizing graph algorithms with color-coded operations and interactive playback. DFS, BFS, Dijkstra, and tree traversal are supported.
 
 ![Graphe DFS visualizer](assets/screenshot001.png)
 
@@ -64,7 +64,28 @@ node B
 edge A B
 ```
 
-Use `undirected` instead of `directed` for undirected graphs. For trees, replace `directed` with `tree` and optionally give nodes a display value after their ID:
+Use `undirected` instead of `directed` for undirected graphs.
+
+Graph and tree edges may include a non-negative integer weight. The weight
+defaults to `1` when omitted:
+
+```text
+edge A B 7
+edge B C 0
+edge A C
+```
+
+Dijkstra starts from the first node in the selected alphabetical or insertion
+order. Edge weights and tentative node distances are shown in Dijkstra mode;
+unreachable nodes remain at `inf`. Negative weights are rejected when a graph is
+loaded.
+
+When a directed graph is switched to an undirected view, reciprocal or parallel
+edges collapse into one physical edge. If their weights differ, the smaller
+weight is retained.
+
+For trees, replace `directed` with `tree` and optionally give nodes a display
+value after their ID:
 
 ```text
 tree
@@ -73,4 +94,5 @@ node left beta value
 edge root left
 ```
 
-Loading a tree file switches the app into tree traversal mode. Example files are in `graphs/`.
+Loading a tree file switches the app into tree traversal mode. Example files,
+including `graphs/sample_weighted.graphe`, are in `graphs/`.

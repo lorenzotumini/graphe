@@ -1,8 +1,11 @@
 #ifndef GRAPHE_GRAPH_H
 #define GRAPHE_GRAPH_H
 
-#include <stddef.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <stddef.h>
+
+#define GRAPHE_DISTANCE_INFINITY LLONG_MAX
 
 typedef enum NodeColor { NODE_WHITE, NODE_GRAY, NODE_BLACK } NodeColor;
 
@@ -17,7 +20,9 @@ typedef enum EdgeType {
 typedef enum AlgorithmMode {
     ALGORITHM_DFS,
     ALGORITHM_BFS,
-    ALGORITHM_TREE
+    ALGORITHM_DIJKSTRA,
+    ALGORITHM_TREE,
+    ALGORITHM_MODE_COUNT
 } AlgorithmMode;
 
 typedef enum TreeTraversalOrder {
@@ -30,7 +35,10 @@ typedef enum TraceEventType {
     TRACE_EVENT_DISCOVER_NODE,
     TRACE_EVENT_EXAMINE_EDGE,
     TRACE_EVENT_CLASSIFY_EDGE,
-    TRACE_EVENT_FINISH_NODE
+    TRACE_EVENT_FINISH_NODE,
+    TRACE_EVENT_SET_DISTANCE,
+    TRACE_EVENT_RELAX_EDGE,
+    TRACE_EVENT_SETTLE_NODE
 } TraceEventType;
 
 typedef struct Node {
@@ -40,6 +48,7 @@ typedef struct Node {
     int discover_time;
     int finish_time;
     int level;
+    long long distance;
     NodeColor color;
 } Node;
 
@@ -50,6 +59,7 @@ typedef struct Edge {
     int next_to;
     int next_alpha_from;
     int next_alpha_to;
+    int weight;
     EdgeType type;
 } Edge;
 
@@ -76,6 +86,9 @@ typedef struct TraceEvent {
     int to;
     EdgeType edge_type;
     int time;
+    long long distance;
+    long long old_distance;
+    int replaced_edge;
 } TraceEvent;
 
 typedef struct Trace {
@@ -89,6 +102,7 @@ void graph_free(Graph *graph);
 bool graph_copy(const Graph *source, Graph *out);
 int graph_add_node(Graph *graph, const char *label);
 int graph_add_edge(Graph *graph, int from, int to);
+int graph_add_weighted_edge(Graph *graph, int from, int to, int weight);
 int graph_find_node(const Graph *graph, const char *label);
 bool graph_build_view(const Graph *source, bool directed, Graph *out);
 void graph_copy_node_positions(Graph *to, const Graph *from);

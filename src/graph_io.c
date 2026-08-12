@@ -1,6 +1,8 @@
 #include "graph_io.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +74,27 @@ static bool has_extra_token(char *cursor) {
 
 static bool graph_label_is_valid(const char *label) {
     return label != NULL && label[0] != '\0';
+}
+
+static bool parse_edge_weight(const char *text, int *weight, char *error,
+                              size_t error_size, int line_number) {
+    if (text == NULL) {
+        *weight = 1;
+        return true;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || parsed < 0 ||
+        parsed > INT_MAX) {
+        set_error(error, error_size, "edge weight must be a non-negative integer",
+                  line_number);
+        return false;
+    }
+
+    *weight = (int)parsed;
+    return true;
 }
 
 static int find_or_add_graph_node(Graph *graph, const char *label, char *error,
@@ -416,9 +439,19 @@ bool graph_load_from_file(const char *path, Graph *graph, char *error,
         if (strcmp(command, "edge") == 0) {
             const char *first = read_token(&cursor);
             const char *second = read_token(&cursor);
+            const char *weight_text = read_token(&cursor);
             if (first == NULL || second == NULL || has_extra_token(cursor)) {
-                set_error(error, error_size, "edge line must be: edge FROM TO",
-                          line_number);
+                set_error(error, error_size,
+                          "edge line must be: edge FROM TO [WEIGHT]", line_number);
+                fclose(file);
+                graph_free(&loaded);
+                tree_id_map_free(&tree_ids);
+                return false;
+            }
+
+            int weight;
+            if (!parse_edge_weight(weight_text, &weight, error, error_size,
+                                   line_number)) {
                 fclose(file);
                 graph_free(&loaded);
                 tree_id_map_free(&tree_ids);
@@ -447,7 +480,7 @@ bool graph_load_from_file(const char *path, Graph *graph, char *error,
                 return false;
             }
 
-            if (graph_add_edge(&loaded, from, to) < 0) {
+            if (graph_add_weighted_edge(&loaded, from, to, weight) < 0) {
                 set_error(error, error_size, "could not add edge", line_number);
                 fclose(file);
                 graph_free(&loaded);

@@ -1,0 +1,4 @@
+directed
+node A
+node B
+edge A B -1

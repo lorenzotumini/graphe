@@ -12,6 +12,15 @@ typedef struct TraversalState {
     int time;
 } TraversalState;
 
+typedef struct DijkstraHeap {
+    int *nodes;
+    int *positions;
+    const long long *distances;
+    const int *ranks;
+    size_t count;
+    size_t capacity;
+} DijkstraHeap;
+
 static const TraversalOptions default_options = {
     .algorithm = ALGORITHM_DFS,
     .alphabetical = 1,
@@ -60,6 +69,9 @@ static TraceEvent make_node_event(TraceEventType type, int node, int time) {
     event.to = -1;
     event.edge_type = EDGE_UNCLASSIFIED;
     event.time = time;
+    event.distance = GRAPHE_DISTANCE_INFINITY;
+    event.old_distance = GRAPHE_DISTANCE_INFINITY;
+    event.replaced_edge = -1;
 
     return event;
 }
@@ -75,6 +87,9 @@ static TraceEvent make_edge_event(TraceEventType type, int edge, int from, int t
     event.to = to;
     event.edge_type = edge_type;
     event.time = -1;
+    event.distance = GRAPHE_DISTANCE_INFINITY;
+    event.old_distance = GRAPHE_DISTANCE_INFINITY;
+    event.replaced_edge = -1;
 
     return event;
 }
@@ -83,6 +98,25 @@ static TraceEvent make_edge_event_with_time(TraceEventType type, int edge, int f
                                             int to, EdgeType edge_type, int time) {
     TraceEvent event = make_edge_event(type, edge, from, to, edge_type);
     event.time = time;
+    return event;
+}
+
+static TraceEvent make_distance_event(TraceEventType type, int node,
+                                      long long distance, long long old_distance) {
+    TraceEvent event = make_node_event(type, node, -1);
+    event.distance = distance;
+    event.old_distance = old_distance;
+    return event;
+}
+
+static TraceEvent make_relax_event(int edge, int from, int to, long long distance,
+                                   long long old_distance, int replaced_edge) {
+    TraceEvent event =
+        make_edge_event(TRACE_EVENT_RELAX_EDGE, edge, from, to, EDGE_TREE);
+    event.node = to;
+    event.distance = distance;
+    event.old_distance = old_distance;
+    event.replaced_edge = replaced_edge;
     return event;
 }
 
@@ -343,6 +377,207 @@ static void build_bfs_trace(const Graph *graph, const TraversalOptions *options,
     traversal_state_free(&state);
 }
 
+static bool dijkstra_heap_node_precedes(const DijkstraHeap *heap, int left,
+                                        int right) {
+    if (heap->distances[left] != heap->distances[right])
+        return heap->distances[left] < heap->distances[right];
+    return heap->ranks[left] < heap->ranks[right];
+}
+
+static void dijkstra_heap_swap(DijkstraHeap *heap, size_t left, size_t right) {
+    int left_node = heap->nodes[left];
+    int right_node = heap->nodes[right];
+
+    heap->nodes[left] = right_node;
+    heap->nodes[right] = left_node;
+    heap->positions[left_node] = (int)right;
+    heap->positions[right_node] = (int)left;
+}
+
+static void dijkstra_heap_sift_up(DijkstraHeap *heap, size_t position) {
+    while (position > 0) {
+        size_t parent = (position - 1) / 2;
+        if (!dijkstra_heap_node_precedes(heap, heap->nodes[position],
+                                         heap->nodes[parent]))
+            break;
+        dijkstra_heap_swap(heap, position, parent);
+        position = parent;
+    }
+}
+
+static void dijkstra_heap_sift_down(DijkstraHeap *heap, size_t position) {
+    for (;;) {
+        size_t left = position * 2 + 1;
+        size_t right = left + 1;
+        size_t best = position;
+
+        if (left < heap->count &&
+            dijkstra_heap_node_precedes(heap, heap->nodes[left], heap->nodes[best]))
+            best = left;
+        if (right < heap->count &&
+            dijkstra_heap_node_precedes(heap, heap->nodes[right], heap->nodes[best]))
+            best = right;
+        if (best == position) break;
+
+        dijkstra_heap_swap(heap, position, best);
+        position = best;
+    }
+}
+
+static bool dijkstra_heap_init(DijkstraHeap *heap, size_t node_count,
+                               const long long *distances, const int *ranks) {
+    memset(heap, 0, sizeof(*heap));
+    heap->distances = distances;
+    heap->ranks = ranks;
+    heap->capacity = node_count;
+
+    if (node_count == 0) return true;
+
+    heap->nodes = malloc(node_count * sizeof(*heap->nodes));
+    heap->positions = malloc(node_count * sizeof(*heap->positions));
+    if (heap->nodes == NULL || heap->positions == NULL) {
+        free(heap->nodes);
+        free(heap->positions);
+        memset(heap, 0, sizeof(*heap));
+        return false;
+    }
+
+    for (size_t i = 0; i < node_count; i++) heap->positions[i] = -1;
+    return true;
+}
+
+static void dijkstra_heap_free(DijkstraHeap *heap) {
+    free(heap->nodes);
+    free(heap->positions);
+    memset(heap, 0, sizeof(*heap));
+}
+
+static bool dijkstra_heap_add_or_decrease(DijkstraHeap *heap, int node) {
+    int position = heap->positions[node];
+    if (position == -2) return false;
+
+    if (position == -1) {
+        if (heap->count >= heap->capacity) return false;
+        position = (int)heap->count;
+        heap->nodes[heap->count] = node;
+        heap->positions[node] = position;
+        heap->count++;
+    }
+
+    dijkstra_heap_sift_up(heap, (size_t)position);
+    return true;
+}
+
+static int dijkstra_heap_pop(DijkstraHeap *heap) {
+    if (heap->count == 0) return -1;
+
+    int node = heap->nodes[0];
+    heap->positions[node] = -2;
+    heap->count--;
+
+    if (heap->count > 0) {
+        heap->nodes[0] = heap->nodes[heap->count];
+        heap->positions[heap->nodes[0]] = 0;
+        dijkstra_heap_sift_down(heap, 0);
+    }
+
+    return node;
+}
+
+/*
+ * Dijkstra uses the first node in the selected traversal order as its source.
+ * Successful relaxations replace the currently highlighted predecessor edge,
+ * while settled nodes are final and never re-enter the min-heap.
+ */
+static void build_dijkstra_trace(const Graph *graph, const TraversalOptions *options,
+                                 Trace *trace) {
+    if (graph->node_count == 0) return;
+
+    long long *distances = malloc(graph->node_count * sizeof(*distances));
+    int *parent_edges = malloc(graph->node_count * sizeof(*parent_edges));
+    int *ranks = malloc(graph->node_count * sizeof(*ranks));
+    unsigned char *settled = calloc(graph->node_count, sizeof(*settled));
+    if (distances == NULL || parent_edges == NULL || ranks == NULL ||
+        settled == NULL) {
+        free(distances);
+        free(parent_edges);
+        free(ranks);
+        free(settled);
+        return;
+    }
+
+    for (size_t i = 0; i < graph->node_count; i++) {
+        distances[i] = GRAPHE_DISTANCE_INFINITY;
+        parent_edges[i] = -1;
+        ranks[i] = (int)i;
+    }
+
+    int rank = 0;
+    for (int node = first_root_node(graph, options); node != -1;
+         node = next_root_node(graph, node, options)) {
+        ranks[node] = rank;
+        rank++;
+    }
+
+    DijkstraHeap heap;
+    if (!dijkstra_heap_init(&heap, graph->node_count, distances, ranks)) {
+        free(distances);
+        free(parent_edges);
+        free(ranks);
+        free(settled);
+        return;
+    }
+
+    int source = first_root_node(graph, options);
+    distances[source] = 0;
+    push_event(trace, make_distance_event(TRACE_EVENT_SET_DISTANCE, source, 0,
+                                          GRAPHE_DISTANCE_INFINITY));
+    dijkstra_heap_add_or_decrease(&heap, source);
+
+    while (heap.count > 0) {
+        int node = dijkstra_heap_pop(&heap);
+        if (node < 0 || settled[node]) continue;
+
+        settled[node] = 1;
+        push_event(trace, make_distance_event(TRACE_EVENT_SETTLE_NODE, node,
+                                              distances[node], distances[node]));
+
+        for (int edge_id = first_out_edge(graph, node, options); edge_id != -1;
+             edge_id = next_out_edge(graph, edge_id, node, options)) {
+            int neighbor = graph_edge_neighbor(graph, edge_id, node);
+            if (neighbor < 0) continue;
+
+            push_event(trace, make_edge_event(TRACE_EVENT_EXAMINE_EDGE, edge_id,
+                                              node, neighbor, EDGE_UNCLASSIFIED));
+
+            const Edge *edge = &graph->edges[edge_id];
+            if (settled[neighbor] || edge->weight < 0 ||
+                distances[node] == GRAPHE_DISTANCE_INFINITY ||
+                (long long)edge->weight > GRAPHE_DISTANCE_INFINITY - distances[node])
+                continue;
+
+            long long candidate = distances[node] + edge->weight;
+            if (distances[neighbor] != GRAPHE_DISTANCE_INFINITY &&
+                candidate >= distances[neighbor])
+                continue;
+
+            long long old_distance = distances[neighbor];
+            int old_parent_edge = parent_edges[neighbor];
+            distances[neighbor] = candidate;
+            parent_edges[neighbor] = edge_id;
+            push_event(trace, make_relax_event(edge_id, node, neighbor, candidate,
+                                               old_distance, old_parent_edge));
+            dijkstra_heap_add_or_decrease(&heap, neighbor);
+        }
+    }
+
+    dijkstra_heap_free(&heap);
+    free(distances);
+    free(parent_edges);
+    free(ranks);
+    free(settled);
+}
+
 /*
  * Tree traversal deliberately uses insertion-order children. Tree files are
  * ordered examples, and alphabetical sorting would change the printed sequence
@@ -437,6 +672,9 @@ void traversal_trace_build(const Graph *graph, const TraversalOptions *options,
     case ALGORITHM_BFS:
         build_bfs_trace(graph, options, trace);
         break;
+    case ALGORITHM_DIJKSTRA:
+        build_dijkstra_trace(graph, options, trace);
+        break;
     case ALGORITHM_TREE:
         build_tree_trace(graph, options, trace);
         break;
@@ -480,6 +718,23 @@ void traversal_trace_apply_prefix(const Graph *base, const Trace *trace,
         case TRACE_EVENT_FINISH_NODE:
             out->nodes[event->node].color = NODE_BLACK;
             out->nodes[event->node].finish_time = event->time;
+            break;
+        case TRACE_EVENT_SET_DISTANCE:
+            out->nodes[event->node].color = NODE_GRAY;
+            out->nodes[event->node].distance = event->distance;
+            break;
+        case TRACE_EVENT_RELAX_EDGE:
+            if (event->replaced_edge >= 0 &&
+                (size_t)event->replaced_edge < out->edge_count)
+                out->edges[event->replaced_edge].type = EDGE_UNCLASSIFIED;
+            out->edges[event->edge].type = EDGE_TREE;
+            out->nodes[event->to].distance = event->distance;
+            if (out->nodes[event->to].color == NODE_WHITE)
+                out->nodes[event->to].color = NODE_GRAY;
+            break;
+        case TRACE_EVENT_SETTLE_NODE:
+            out->nodes[event->node].distance = event->distance;
+            out->nodes[event->node].color = NODE_BLACK;
             break;
         default:
             break;

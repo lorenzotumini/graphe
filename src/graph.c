@@ -167,7 +167,7 @@ void graph_copy_node_positions(Graph *to, const Graph *from) {
 
 /*
  * Checks only the structural identity needed to reuse an already-allocated scene
- * graph: directedness, node labels, and physical edge endpoints.
+ * graph: directedness, node labels, and weighted physical edge endpoints.
  */
 bool graph_structure_equals(const Graph *left, const Graph *right) {
     if (left->directed != right->directed) return false;
@@ -180,7 +180,8 @@ bool graph_structure_equals(const Graph *left, const Graph *right) {
 
     for (size_t i = 0; i < left->edge_count; i++) {
         if (left->edges[i].from != right->edges[i].from ||
-            left->edges[i].to != right->edges[i].to) {
+            left->edges[i].to != right->edges[i].to ||
+            left->edges[i].weight != right->edges[i].weight) {
             return false;
         }
     }
@@ -239,6 +240,7 @@ int graph_add_node(Graph *graph, const char *label) {
     node->discover_time = -1;
     node->finish_time = -1;
     node->level = -1;
+    node->distance = GRAPHE_DISTANCE_INFINITY;
     node->color = NODE_WHITE;
     graph->next_alpha_node[node_index] = -1;
     graph->first_out[node_index] = -1;
@@ -360,8 +362,9 @@ static void graph_link_edge_by_target_label(Graph *graph, int node, int edge_ind
  * graphs this does not create a reverse edge; the same edge is reachable from
  * both endpoints.
  */
-int graph_add_edge(Graph *graph, int from, int to) {
+int graph_add_weighted_edge(Graph *graph, int from, int to, int weight) {
     if (from < 0 || to < 0) return -1;
+    if (weight < 0) return -1;
 
     if ((size_t)from >= graph->node_count || (size_t)to >= graph->node_count)
         return -1;
@@ -376,6 +379,7 @@ int graph_add_edge(Graph *graph, int from, int to) {
     edge->next_to = -1;
     edge->next_alpha_from = -1;
     edge->next_alpha_to = -1;
+    edge->weight = weight;
     edge->type = EDGE_UNCLASSIFIED;
 
     graph_link_edge_by_insertion_order(graph, from, edge_index);
@@ -389,26 +393,32 @@ int graph_add_edge(Graph *graph, int from, int to) {
     return edge_index;
 }
 
+int graph_add_edge(Graph *graph, int from, int to) {
+    return graph_add_weighted_edge(graph, from, to, 1);
+}
+
 bool graph_edge_is_visible(const Graph *graph, int edge_index) {
     return edge_index >= 0 && (size_t)edge_index < graph->edge_count;
 }
 
-static bool graph_has_undirected_pair(const Graph *graph, int from, int to) {
+static int graph_find_undirected_pair(const Graph *graph, int from, int to) {
     for (size_t i = 0; i < graph->edge_count; i++) {
         const Edge *edge = &graph->edges[i];
 
         if ((edge->from == from && edge->to == to) ||
             (edge->from == to && edge->to == from)) {
-            return true;
+            return (int)i;
         }
     }
 
-    return false;
+    return -1;
 }
 
 /*
  * Builds the graph view shown by the app. Directed views preserve every source
  * edge, while undirected views collapse reciprocal pairs into one physical edge.
+ * If collapsed edges have different weights, the smaller weight preserves the
+ * useful shortest-path connection in the undirected interpretation.
  */
 bool graph_build_view(const Graph *source, bool directed, Graph *out) {
     Graph view;
@@ -429,10 +439,15 @@ bool graph_build_view(const Graph *source, bool directed, Graph *out) {
     for (size_t i = 0; i < source->edge_count; i++) {
         const Edge *edge = &source->edges[i];
 
-        if (!directed && graph_has_undirected_pair(&view, edge->from, edge->to))
+        int pair =
+            directed ? -1 : graph_find_undirected_pair(&view, edge->from, edge->to);
+        if (pair >= 0) {
+            if (edge->weight < view.edges[pair].weight)
+                view.edges[pair].weight = edge->weight;
             continue;
+        }
 
-        if (graph_add_edge(&view, edge->from, edge->to) < 0) {
+        if (graph_add_weighted_edge(&view, edge->from, edge->to, edge->weight) < 0) {
             graph_free(&view);
             return false;
         }
@@ -452,6 +467,7 @@ void graph_reset_visual_state(Graph *graph) {
         graph->nodes[i].discover_time = -1;
         graph->nodes[i].finish_time = -1;
         graph->nodes[i].level = -1;
+        graph->nodes[i].distance = GRAPHE_DISTANCE_INFINITY;
         graph->nodes[i].color = NODE_WHITE;
     }
 
@@ -469,15 +485,15 @@ void graph_build_sample(Graph *graph) {
     int e = graph_add_node(graph, "E");
     int f = graph_add_node(graph, "F");
 
-    graph_add_edge(graph, a, b);
-    graph_add_edge(graph, a, c);
-    graph_add_edge(graph, b, d);
-    graph_add_edge(graph, b, e);
-    graph_add_edge(graph, c, b);
-    graph_add_edge(graph, c, f);
-    graph_add_edge(graph, d, c);
-    graph_add_edge(graph, e, d);
-    graph_add_edge(graph, f, c);
+    graph_add_weighted_edge(graph, a, b, 4);
+    graph_add_weighted_edge(graph, a, c, 2);
+    graph_add_weighted_edge(graph, b, d, 5);
+    graph_add_weighted_edge(graph, b, e, 3);
+    graph_add_weighted_edge(graph, c, b, 1);
+    graph_add_weighted_edge(graph, c, f, 7);
+    graph_add_weighted_edge(graph, d, c, 2);
+    graph_add_weighted_edge(graph, e, d, 1);
+    graph_add_weighted_edge(graph, f, c, 6);
 }
 
 void graph_build_expression_tree(Graph *graph) {
@@ -535,6 +551,8 @@ const char *algorithm_mode_name(AlgorithmMode mode) {
         return "DFS";
     case ALGORITHM_BFS:
         return "BFS";
+    case ALGORITHM_DIJKSTRA:
+        return "Dijkstra";
     case ALGORITHM_TREE:
         return "Tree traversal";
     default:

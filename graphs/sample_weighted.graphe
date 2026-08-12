@@ -1,0 +1,16 @@
+# Dijkstra sample: relaxation replacement, a default weight, a zero-weight
+# return edge, and one unreachable node.
+directed
+node A
+node B
+node C
+node D
+node E
+node F
+edge A B 4
+edge A C 1
+edge C B 2
+edge C D 5
+edge B D 1
+edge D E
+edge E C 0

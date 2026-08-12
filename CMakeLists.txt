@@ -13,6 +13,7 @@ endif()
 
 option(GRAPHE_FETCH_RAYLIB "Fetch raylib with CMake when no system package is found" ON)
 
+set(GRAPHE_RAYLIB_FETCHED OFF)
 find_package(raylib QUIET)
 
 if(NOT raylib_FOUND)
@@ -25,13 +26,17 @@ if(NOT raylib_FOUND)
     set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
     set(CUSTOMIZE_BUILD ON CACHE BOOL "" FORCE)
     set(SUPPORT_SCREEN_CAPTURE OFF CACHE BOOL "" FORCE)
+    set(SUPPORT_CLIPBOARD_IMAGE OFF CACHE BOOL "" FORCE)
+    set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         raylib
         URL https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz
         URL_HASH SHA256=aea98ecf5bc5c5e0b789a76de0083a21a70457050ea4cc2aec7566935f5e258e
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
+
     FetchContent_MakeAvailable(raylib)
+    set(GRAPHE_RAYLIB_FETCHED ON)
 endif()
 
 include(FetchContent)
@@ -63,9 +68,13 @@ if(BUILD_TESTING)
         tests/graph_traversal_tests.c
         src/graph.c
         src/graph_io.c
+        src/layout.c
         src/traversal.c
     )
     target_include_directories(graphe_tests PRIVATE src)
+    if(NOT WIN32)
+        target_link_libraries(graphe_tests PRIVATE m)
+    endif()
     add_test(NAME graphe_tests COMMAND graphe_tests)
     set_tests_properties(graphe_tests PROPERTIES
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -85,5 +94,11 @@ if(MSVC)
     target_compile_options(graphe PRIVATE /W4)
 else()
     set_source_files_properties(src/raygui_impl.c PROPERTIES COMPILE_OPTIONS -w)
+    if(GRAPHE_RAYLIB_FETCHED)
+        # Keep diagnostics strict for Graphe while treating fetched raylib as the
+        # third-party dependency it is. GCC otherwise reports warnings from
+        # raylib's generated configuration definitions.
+        target_compile_options(raylib PRIVATE -w)
+    endif()
     target_compile_options(graphe PRIVATE -Wall -Wextra -pedantic)
 endif()
