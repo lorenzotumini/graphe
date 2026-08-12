@@ -54,17 +54,15 @@ ctest --test-dir build -C Debug --output-on-failure
 
 ## Graph Files
 
-Load `.graphe` files via the path field in Settings. The format is line-oriented:
+Load `.graphe` files via the path field in Settings.
 
 ```text
-# directed graph
+# my graph
 directed
 node A
 node B
 edge A B
 ```
-
-Use `undirected` instead of `directed` for undirected graphs.
 
 Graph and tree edges may include a non-negative integer weight. The weight
 defaults to `1` when omitted:
@@ -76,13 +74,8 @@ edge A C
 ```
 
 Dijkstra starts from the first node in the selected alphabetical or insertion
-order. Edge weights and tentative node distances are shown in Dijkstra mode;
-unreachable nodes remain at `inf`. Negative weights are rejected when a graph is
-loaded.
-
-When a directed graph is switched to an undirected view, reciprocal or parallel
-edges collapse into one physical edge. If their weights differ, the smaller
-weight is retained.
+order. Unreachable nodes remain at `inf`. Negative weights are rejected when 
+a graph is loaded.
 
 For trees, replace `directed` with `tree` and optionally give nodes a display
 value after their ID:
@@ -93,6 +86,3 @@ node root +
 node left beta value
 edge root left
 ```
-
-Loading a tree file switches the app into tree traversal mode. Example files,
-including `graphs/sample_weighted.graphe`, are in `graphs/`.
